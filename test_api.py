@@ -1,12 +1,12 @@
 import os
 os.environ["DATABASE_URL"] = "sqlite://"
-os.environ["JWT_SECRET"] = "test-key-do-not-use-for-real"
+os.environ["JWT_SECRET"] = "test-key-do-not-use-for-real-32-characters"
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
-from app.main import app, Base, get_db, User, current_user, triage
+from main import app, Base, get_db, User, current_user, triage
 
 engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
 Session = sessionmaker(bind=engine)

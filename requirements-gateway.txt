@@ -1,0 +1,4 @@
+# Install on Windows, outside Docker. Keeps the already tested Meshtastic version.
+-r requirements.txt
+meshtastic==2.7.11
+Pypubsub>=4.0,<5
