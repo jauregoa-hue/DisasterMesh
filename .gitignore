@@ -1,0 +1,32 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# JavaScript
+node_modules/
+dist/
+coverage/
+
+# Database
+backups/
+*.dump
+*.sql.gz
+
+# Security scan outputs
+security-checks/
+*-sbom.txt
+*rescan*.txt
+docker-scout-recommendations.txt
+*.zip
+
+# Logs and local files
+*.log
+.DS_Store

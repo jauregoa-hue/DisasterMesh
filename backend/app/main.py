@@ -1,15 +1,15 @@
 import os
 import re
+import hmac
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
-import httpx
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Header, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, select
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./disastermesh-dev.db")
@@ -42,6 +42,24 @@ class Incident(Base):
     state: Mapped[str] = mapped_column(String(20), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+# Two-node prototype: one fixed sender radio and one USB gateway.
+RESCUE_DEVICE_ID = "!0436bda8"
+RESCUE_DEVICE_NAME = "Rescue Node"
+
+class RadioMessage(Base):
+    __tablename__ = "radio_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    packet_id: Mapped[str] = mapped_column(String(100))
+    device_id: Mapped[str] = mapped_column(String(30))
+    device_name: Mapped[str] = mapped_column(String(80))
+    message: Mapped[str] = mapped_column(Text)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    snr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    incident_id: Mapped[int | None] = mapped_column(ForeignKey("incidents.id"), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("device_id", "packet_id", name="uq_radio_device_packet"),)
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -58,6 +76,14 @@ def create_tables():
 def get_db():
     with SessionLocal() as db:
         yield db
+
+class GatewayMessageIn(BaseModel):
+    packet_id: str = Field(min_length=1, max_length=100)
+    device_id: str = Field(min_length=1, max_length=30)
+    message: str = Field(min_length=1, max_length=1000)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    snr: float | None = Field(default=None, ge=-100, le=100)
 
 class RegisterIn(BaseModel):
     username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -121,6 +147,53 @@ def triage(message: str):
 
 def audit(db: Session, actor_id: int, action: str, incident_id: int | None = None):
     db.add(AuditLog(actor_id=actor_id, action=action, incident_id=incident_id))
+
+def verify_gateway(x_gateway_key: str | None = Header(default=None)):
+    expected = os.getenv("GATEWAY_KEY", "")
+    if not expected or not x_gateway_key or not hmac.compare_digest(x_gateway_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid gateway credentials")
+
+@app.post("/gateway/messages", status_code=201)
+def receive_gateway_message(data: GatewayMessageIn, _: None = Depends(verify_gateway), db: Session = Depends(get_db)):
+    if data.device_id != RESCUE_DEVICE_ID:
+        raise HTTPException(status_code=403, detail="Device is not enrolled")
+    old = db.scalar(select(RadioMessage).where(RadioMessage.device_id == data.device_id, RadioMessage.packet_id == data.packet_id))
+    if old:
+        return {"duplicate": True, "message_id": old.id, "incident_id": old.incident_id}
+    # A fixed local responder account owns incident records, preserving the existing schema.
+    owner_name = os.getenv("GATEWAY_OWNER_USERNAME", "responder1")
+    owner = db.scalar(select(User).where(User.username == owner_name))
+    if owner is None or owner.role not in ("responder", "admin"):
+        raise HTTPException(status_code=503, detail="Configured responder account is missing or not a responder")
+    incident_id = None
+    # A simple two-node SOS demo: only SOS messages create incidents.
+    if re.search(r"\bSOS\b", data.message, flags=re.IGNORECASE):
+        category, priority = triage(data.message)
+        incident = Incident(owner_id=owner.id, title="Radio SOS - " + RESCUE_DEVICE_NAME,
+                            message=data.message, category=category,
+                            priority="high", state="open")
+        db.add(incident)
+        db.flush()
+        incident_id = incident.id
+        audit(db, owner.id, "gateway.sos", incident_id)
+    row = RadioMessage(packet_id=data.packet_id, device_id=RESCUE_DEVICE_ID,
+                       device_name=RESCUE_DEVICE_NAME, message=data.message,
+                       latitude=data.latitude, longitude=data.longitude,
+                       snr=data.snr, incident_id=incident_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"duplicate": False, "message_id": row.id, "incident_id": incident_id}
+
+@app.get("/gateway/messages")
+def list_gateway_messages(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.role not in ("responder", "admin"):
+        raise HTTPException(status_code=403, detail="Responder or admin required")
+    rows = db.scalars(select(RadioMessage).order_by(RadioMessage.id.desc()).limit(50)).all()
+    return [{"id": r.id, "device_id": r.device_id, "device_name": r.device_name,
+             "message": r.message, "latitude": r.latitude, "longitude": r.longitude,
+             "snr": r.snr, "incident_id": r.incident_id, "received_at": r.received_at}
+            for r in rows]
 
 @app.get("/health")
 def health():
@@ -211,16 +284,4 @@ async def summary(incident_id: int, user: User = Depends(current_user), db: Sess
     if not incident or (user.role == "citizen" and incident.owner_id != user.id):
         raise HTTPException(status_code=404, detail="Incident not found")
     fallback = f"[{incident.priority.upper()}] {incident.category}: {incident.title}. {incident.message[:250]}"
-    if os.getenv("AI_MODE", "rules") != "ollama":
-        return {"summary": fallback, "source": "rules"}
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(os.getenv("OLLAMA_URL", "http://host.docker.internal:11434") + "/api/generate", json={
-                "model": os.getenv("OLLAMA_MODEL", "gemma3:1b"), "stream": False,
-                "prompt": "Summarize this disaster report in one neutral sentence. Do not invent facts or instructions. Report: " + incident.message,
-                "options": {"num_predict": 100},
-            })
-            response.raise_for_status()
-            return {"summary": response.json()["response"], "source": "ollama"}
-    except (httpx.HTTPError, KeyError, ValueError):
-        return {"summary": fallback, "source": "rules_fallback"}
+    return {"summary": fallback, "source": "rules"}
