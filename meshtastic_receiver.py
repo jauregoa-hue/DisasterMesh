@@ -24,7 +24,14 @@ outbox = None
 
 
 def allowed_nodes():
-    return {x.strip().lower() for x in os.getenv("MESHTASTIC_ALLOWED_NODES", "!0436bda8").split(",") if x.strip()}
+    return {
+        x.strip().lower()
+        for x in os.getenv(
+            "MESHTASTIC_ALLOWED_NODES",
+            "!0436bda8,!043877c8"
+        ).split(",")
+        if x.strip()
+    }
 
 
 def sender_id(packet):
