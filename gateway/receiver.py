@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from pubsub import pub
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-RESCUE_DEVICE_ID = "!0436bda8"
+RESCUE_DEVICE_ID = "!043877c8"
 GATEWAY_KEY = os.getenv("GATEWAY_KEY", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 SERIAL_PORT = os.getenv("MESHTASTIC_PORT") or None
@@ -40,6 +40,10 @@ def on_position(packet, interface):
 
 
 def on_message(packet, interface):
+    print("\n[INCOMING TEXT PACKET]", flush=True)
+    print("Sender:", packet.get("fromId"), flush=True)
+    print("Channel:", packet.get("channel"), flush=True)
+    print("Message:", packet.get("decoded", {}).get("text"), flush=True)
     if packet.get("fromId") != RESCUE_DEVICE_ID:
         return
     decoded = packet.get("decoded", {})

@@ -43,7 +43,7 @@ class Incident(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 # Two-node prototype: one fixed sender radio and one USB gateway.
-RESCUE_DEVICE_ID = "!0436bda8"
+RESCUE_DEVICE_ID = "!043877c8"
 RESCUE_DEVICE_NAME = "Rescue Node"
 
 class RadioMessage(Base):
@@ -165,17 +165,50 @@ def receive_gateway_message(data: GatewayMessageIn, _: None = Depends(verify_gat
     owner = db.scalar(select(User).where(User.username == owner_name))
     if owner is None or owner.role not in ("responder", "admin"):
         raise HTTPException(status_code=503, detail="Configured responder account is missing or not a responder")
+    # Classify incoming Meshtastic emergency messages
+    message = data.message.strip().lower()
     incident_id = None
-    # A simple two-node SOS demo: only SOS messages create incidents.
-    if re.search(r"\bSOS\b", data.message, flags=re.IGNORECASE):
-        category, priority = triage(data.message)
-        incident = Incident(owner_id=owner.id, title="Radio SOS - " + RESCUE_DEVICE_NAME,
-                            message=data.message, category=category,
-                            priority="high", state="open")
+
+    if re.search(r"\bsos\b|\brescue\b", message):
+        category = "rescue"
+        priority = "high"
+        title = "SOS / Rescue - " + RESCUE_DEVICE_NAME
+
+    elif re.search(r"\bmedical\b", message):
+        category = "medical"
+        priority = "high"
+        title = "Medical Emergency - " + RESCUE_DEVICE_NAME
+
+    elif re.search(r"\bsupply\b|\bsupplies\b", message):
+        category = "supply"
+        priority = "medium"
+        title = "Supply Request - " + RESCUE_DEVICE_NAME
+
+    else:
+        category = None
+
+    # Create incidents only for recognized emergency messages
+    if category is not None:
+        incident = Incident(
+            owner_id=owner.id,
+            title=title,
+            message=data.message,
+            category=category,
+            priority=priority,
+            state="open"
+        )
+
         db.add(incident)
         db.flush()
+
         incident_id = incident.id
-        audit(db, owner.id, "gateway.sos", incident_id)
+
+        audit(
+            db,
+            owner.id,
+            "gateway." + category,
+            incident_id
+        )
     row = RadioMessage(packet_id=data.packet_id, device_id=RESCUE_DEVICE_ID,
                        device_name=RESCUE_DEVICE_NAME, message=data.message,
                        latitude=data.latitude, longitude=data.longitude,
