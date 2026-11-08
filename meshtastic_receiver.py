@@ -49,7 +49,7 @@ def on_position(packet, interface):
     sender = packet.get("fromId", "Unknown")
 
     # Ignore GPS updates from other devices
-    if sender != "!0436bda8":
+    if sender != "!0436bda8" and sender != "!043877c8":
         return
 
     position = packet.get("decoded", {}).get("position", {})
@@ -102,7 +102,7 @@ radio = meshtastic.serial_interface.SerialInterface(
 
 # Load positions already known by the gateway
 for node_id, node in radio.nodes.items():
-    if node_id == "!0436bda8":
+    if node_id in ("!0436bda8", "!043877c8"):
         position = node.get("position", {})
         save_position(node_id, position)
 
